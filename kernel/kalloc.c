@@ -18,15 +18,41 @@ struct run {
   struct run *next;
 };
 
-struct {
+struct kmem{
   struct spinlock lock;
   struct run *freelist;
-} kmem;
+};
 
+struct kmem kmems[3];
+
+int getcpu(){
+  push_off();
+  int cpu=cpuid();
+  pop_off();
+  return cpu;
+}
+
+void printkmem(){
+  printf("###########################################\n");
+  for(int i=0;i<3;i++){
+    int c=0;
+    struct run *p=kmems[i].freelist;
+    while(p!=0){
+      p=p->next;
+      c++;
+    }
+    printf("cpu id %d : %d blocks\n",i,c);
+  }
+  printf("###########################################\n");
+  
+}
 void
 kinit()
 {
-  initlock(&kmem.lock, "kmem");
+
+  printf("[kinit] cpu id %d\n",getcpu());
+  for(int i=0;i<3;i++)
+    initlock(&kmems[i].lock, "kmem");
   freerange(end, (void*)PHYSTOP);
 }
 
@@ -55,27 +81,43 @@ kfree(void *pa)
   memset(pa, 1, PGSIZE);
 
   r = (struct run*)pa;
-
-  acquire(&kmem.lock);
-  r->next = kmem.freelist;
-  kmem.freelist = r;
-  release(&kmem.lock);
+  int hart=getcpu();
+  acquire(&kmems[hart].lock);
+  r->next = kmems[hart].freelist;
+  kmems[hart].freelist = r;
+  release(&kmems[hart].lock);
 }
 
-// Allocate one 4096-byte page of physical memory.
-// Returns a pointer that the kernel can use.
-// Returns 0 if the memory cannot be allocated.
+void *
+steal(){
+  struct run * rs=0;
+  for(int i=0;i<3;i++){
+    acquire(&kmems[i].lock);
+    if(kmems[i].freelist!=0){
+      rs=kmems[i].freelist;
+      kmems[i].freelist=rs->next;
+      release(&kmems[i].lock);
+      return (void *)rs;
+    }
+    release(&kmems[i].lock);
+  }
+  return (void *)rs;
+}
+
 void *
 kalloc(void)
 {
   struct run *r;
-
-  acquire(&kmem.lock);
-  r = kmem.freelist;
+  int hart=getcpu();
+  acquire(&kmems[hart].lock);
+  r = kmems[hart].freelist;
   if(r)
-    kmem.freelist = r->next;
-  release(&kmem.lock);
-
+    kmems[hart].freelist = r->next;
+  release(&kmems[hart].lock);
+  if(!r)
+  {
+    r=steal(hart);
+  }
   if(r)
     memset((char*)r, 5, PGSIZE); // fill with junk
   return (void*)r;
